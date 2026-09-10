@@ -1,0 +1,19 @@
+{
+  "accounts": [
+    {
+      "name": "financeiro",
+      "user": "financeiro@empresa.com.br",
+      "password": "senha-ou-app-password",
+      "from": "Financeiro <financeiro@empresa.com.br>"
+    },
+    {
+      "name": "pessoal",
+      "user": "voce@gmail.com",
+      "password": "app-password",
+      "imap_host": "imap.gmail.com",
+      "smtp_host": "smtp.gmail.com",
+      "smtp_port": 465,
+      "smtp_security": "ssl"
+    }
+  ]
+}

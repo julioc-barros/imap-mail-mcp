@@ -1,11 +1,11 @@
 [project]
 name = "imap-mail-mcp"
-version = "0.1.0"
-description = "MCP server that connects Claude to any IMAP/SMTP mail account: read, search, send, reply, forward, move, flags, folders, attachments."
+version = "0.2.0"
+description = "MCP server that connects Claude to any IMAP/SMTP mail account: read, search, send, reply, forward, move, flags, folders, attachments. Multiple accounts supported."
 readme = "README.md"
 license = "MIT"
 requires-python = ">=3.10"
-authors = [{ name = "Julio" }]
+authors = [{ name = "Julio Barros", email = "juliocbarros339@gmail.com" }]
 keywords = ["mcp", "imap", "smtp", "email", "claude", "model-context-protocol"]
 classifiers = [
   "Development Status :: 4 - Beta",
@@ -16,8 +16,8 @@ classifiers = [
 dependencies = ["mcp>=1.0"]
 
 [project.urls]
-Homepage = "https://github.com/SEU-USUARIO/imap-mail-mcp"
-Issues = "https://github.com/SEU-USUARIO/imap-mail-mcp/issues"
+Homepage = "https://github.com/julioc-barros/imap-mail-mcp"
+Issues = "https://github.com/julioc-barros/imap-mail-mcp/issues"
 
 [project.scripts]
 imap-mail-mcp = "imap_mail_mcp.server:main"

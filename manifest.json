@@ -2,20 +2,39 @@
   "manifest_version": "0.4",
   "name": "imap-mail-mcp",
   "display_name": "IMAP Mail",
-  "version": "0.1.0",
-  "description": "Conecta o Claude a qualquer conta de e-mail IMAP/SMTP: ler, buscar, enviar, responder, encaminhar, mover, flags, pastas e anexos.",
-  "long_description": "Servidor MCP local que fala IMAP4rev1 e SMTP diretamente com o seu servidor de e-mail (Zimbra, Exchange, Dovecot/Postfix, cPanel, hospedagens, Gmail/Outlook com senha de app). Nada passa por serviços de terceiros: a conexão é feita da sua máquina para o seu servidor.\n\nTodas as operações usam UID; pastas com acento são tratadas em UTF-7; busca não-ASCII usa CHARSET UTF-8.",
-  "author": { "name": "Julio" },
-  "repository": { "type": "git", "url": "https://github.com/SEU-USUARIO/imap-mail-mcp.git" },
-  "support": "https://github.com/SEU-USUARIO/imap-mail-mcp/issues",
+  "version": "0.2.0",
+  "description": "Conecta o Claude a uma ou várias contas de e-mail IMAP/SMTP: ler, buscar, enviar, responder, encaminhar, mover, flags, pastas e anexos.",
+  "long_description": "Servidor MCP local que fala IMAP4rev1 e SMTP diretamente com o seu servidor de e-mail (Zimbra, Exchange, Dovecot/Postfix, cPanel, hospedagens, Gmail/Outlook com senha de app). Nada passa por serviços de terceiros: a conexão é feita da sua máquina para o seu servidor.\n\nTodas as operações usam UID; pastas com acento são tratadas em UTF-7; busca não-ASCII usa CHARSET UTF-8.\n\n**Várias contas:** a conta principal é configurada nos campos abaixo; contas adicionais vão em um arquivo JSON (campo \"Arquivo de contas adicionais\"). Campos omitidos herdam da conta principal, então para várias caixas no mesmo servidor basta informar nome, usuário e senha de cada uma.",
+  "author": {
+    "name": "Julio Barros",
+    "email": "juliocbarros339@gmail.com",
+    "url": "https://github.com/julioc-barros"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/julioc-barros/imap-mail-mcp.git"
+  },
+  "support": "https://github.com/julioc-barros/imap-mail-mcp/issues",
   "license": "MIT",
-  "keywords": ["email", "imap", "smtp", "mail", "e-mail"],
+  "keywords": [
+    "email",
+    "imap",
+    "smtp",
+    "mail",
+    "e-mail"
+  ],
   "server": {
     "type": "uv",
     "entry_point": "src/imap_mail_mcp/server.py",
     "mcp_config": {
       "command": "uv",
-      "args": ["run", "--directory", "${__dirname}", "python", "${__dirname}/src/imap_mail_mcp/server.py"],
+      "args": [
+        "run",
+        "--directory",
+        "${__dirname}",
+        "python",
+        "${__dirname}/src/imap_mail_mcp/server.py"
+      ],
       "env": {
         "IMAP_HOST": "${user_config.imap_host}",
         "IMAP_PORT": "${user_config.imap_port}",
@@ -28,43 +47,180 @@
         "MAIL_FROM": "${user_config.mail_from}",
         "SENT_FOLDER": "${user_config.sent_folder}",
         "ATTACH_DIR": "${user_config.attach_dir}",
-        "TLS_VERIFY": "${user_config.tls_verify}"
+        "TLS_VERIFY": "${user_config.tls_verify}",
+        "MAIL_ACCOUNT_NAME": "${user_config.account_name}",
+        "MAIL_ACCOUNTS_FILE": "${user_config.accounts_file}"
       }
     }
   },
   "tools": [
-    { "name": "account_info", "description": "Configuração ativa, capacidades IMAP e pasta Enviados detectada" },
-    { "name": "list_folders", "description": "Lista pastas, opcionalmente com contadores" },
-    { "name": "search_emails", "description": "Busca e-mails por remetente, assunto, texto, data, flags ou critério IMAP bruto" },
-    { "name": "read_email", "description": "Lê um e-mail (cabeçalhos, corpo texto/HTML, anexos)" },
-    { "name": "get_raw_email", "description": "Fonte RFC822 completa" },
-    { "name": "download_attachment", "description": "Salva anexos em disco" },
-    { "name": "send_email", "description": "Envia e-mail (To/Cc/Bcc, HTML, anexos)" },
-    { "name": "reply_email", "description": "Responde mantendo o encadeamento" },
-    { "name": "forward_email", "description": "Encaminha com anexos originais" },
-    { "name": "set_flags", "description": "Marca lido/não lido, estrela, respondido" },
-    { "name": "move_email", "description": "Move e-mails entre pastas" },
-    { "name": "delete_email", "description": "Exclui e-mails" },
-    { "name": "create_folder", "description": "Cria pasta" },
-    { "name": "rename_folder", "description": "Renomeia pasta" },
-    { "name": "delete_folder", "description": "Remove pasta" }
+    {
+      "name": "list_accounts",
+      "description": "Lista as contas configuradas"
+    },
+    {
+      "name": "search_all_accounts",
+      "description": "Mesma busca em todas as contas de uma vez"
+    },
+    {
+      "name": "account_info",
+      "description": "Configuração ativa, capacidades IMAP e pasta Enviados detectada"
+    },
+    {
+      "name": "list_folders",
+      "description": "Lista pastas, opcionalmente com contadores"
+    },
+    {
+      "name": "search_emails",
+      "description": "Busca e-mails por remetente, assunto, texto, data, flags ou critério IMAP bruto"
+    },
+    {
+      "name": "read_email",
+      "description": "Lê um e-mail (cabeçalhos, corpo texto/HTML, anexos)"
+    },
+    {
+      "name": "get_raw_email",
+      "description": "Fonte RFC822 completa"
+    },
+    {
+      "name": "download_attachment",
+      "description": "Salva anexos em disco"
+    },
+    {
+      "name": "send_email",
+      "description": "Envia e-mail (To/Cc/Bcc, HTML, anexos)"
+    },
+    {
+      "name": "reply_email",
+      "description": "Responde mantendo o encadeamento"
+    },
+    {
+      "name": "forward_email",
+      "description": "Encaminha com anexos originais"
+    },
+    {
+      "name": "set_flags",
+      "description": "Marca lido/não lido, estrela, respondido"
+    },
+    {
+      "name": "move_email",
+      "description": "Move e-mails entre pastas"
+    },
+    {
+      "name": "delete_email",
+      "description": "Exclui e-mails"
+    },
+    {
+      "name": "create_folder",
+      "description": "Cria pasta"
+    },
+    {
+      "name": "rename_folder",
+      "description": "Renomeia pasta"
+    },
+    {
+      "name": "delete_folder",
+      "description": "Remove pasta"
+    }
   ],
   "compatibility": {
     "claude_desktop": ">=0.13.0",
-    "platforms": ["darwin", "win32", "linux"]
+    "platforms": [
+      "darwin",
+      "win32",
+      "linux"
+    ]
   },
   "user_config": {
-    "imap_host": { "type": "string", "title": "Servidor IMAP", "description": "Ex.: mail.suaempresa.com.br", "required": true },
-    "imap_port": { "type": "number", "title": "Porta IMAP", "description": "993 (SSL) ou 143 (STARTTLS)", "default": 993, "min": 1, "max": 65535 },
-    "imap_ssl": { "type": "boolean", "title": "IMAP com SSL direto", "description": "Marque para porta 993; desmarque para 143 com STARTTLS", "default": true },
-    "smtp_host": { "type": "string", "title": "Servidor SMTP", "description": "Ex.: mail.suaempresa.com.br", "required": true },
-    "smtp_port": { "type": "number", "title": "Porta SMTP", "description": "587 (STARTTLS), 465 (SSL) ou 25", "default": 587, "min": 1, "max": 65535 },
-    "smtp_security": { "type": "string", "title": "Segurança SMTP", "description": "starttls, ssl ou none", "default": "starttls" },
-    "mail_user": { "type": "string", "title": "Usuário", "description": "Login da conta (normalmente o e-mail completo)", "required": true },
-    "mail_pass": { "type": "string", "title": "Senha", "description": "Senha da conta ou senha de aplicativo", "sensitive": true, "required": true },
-    "mail_from": { "type": "string", "title": "Remetente (From)", "description": "Ex.: Nome <voce@empresa.com.br>. Vazio = usuário", "default": "" },
-    "sent_folder": { "type": "string", "title": "Pasta Enviados", "description": "Vazio = detectar automaticamente", "default": "" },
-    "attach_dir": { "type": "directory", "title": "Pasta para anexos", "description": "Onde os anexos baixados são salvos", "default": "${HOME}/mcp-mail-attachments" },
-    "tls_verify": { "type": "boolean", "title": "Validar certificado TLS", "description": "Desmarque apenas para servidor interno com certificado self-signed", "default": true }
-  }
+    "account_name": {
+      "type": "string",
+      "title": "Nome da conta principal",
+      "description": "Apelido usado no parâmetro `account` (ex.: principal, julio, ti)",
+      "default": "principal"
+    },
+    "imap_host": {
+      "type": "string",
+      "title": "Servidor IMAP",
+      "description": "Ex.: mail.suaempresa.com.br",
+      "required": true
+    },
+    "imap_port": {
+      "type": "number",
+      "title": "Porta IMAP",
+      "description": "993 (SSL) ou 143 (STARTTLS)",
+      "default": 993,
+      "min": 1,
+      "max": 65535
+    },
+    "imap_ssl": {
+      "type": "boolean",
+      "title": "IMAP com SSL direto",
+      "description": "Marque para porta 993; desmarque para 143 com STARTTLS",
+      "default": true
+    },
+    "smtp_host": {
+      "type": "string",
+      "title": "Servidor SMTP",
+      "description": "Ex.: mail.suaempresa.com.br",
+      "required": true
+    },
+    "smtp_port": {
+      "type": "number",
+      "title": "Porta SMTP",
+      "description": "587 (STARTTLS), 465 (SSL) ou 25",
+      "default": 587,
+      "min": 1,
+      "max": 65535
+    },
+    "smtp_security": {
+      "type": "string",
+      "title": "Segurança SMTP",
+      "description": "starttls, ssl ou none",
+      "default": "starttls"
+    },
+    "mail_user": {
+      "type": "string",
+      "title": "Usuário",
+      "description": "Login da conta (normalmente o e-mail completo)",
+      "required": true
+    },
+    "mail_pass": {
+      "type": "string",
+      "title": "Senha",
+      "description": "Senha da conta ou senha de aplicativo",
+      "sensitive": true,
+      "required": true
+    },
+    "mail_from": {
+      "type": "string",
+      "title": "Remetente (From)",
+      "description": "Ex.: Nome <voce@empresa.com.br>. Só o nome também funciona (usa o usuário como endereço)",
+      "default": ""
+    },
+    "sent_folder": {
+      "type": "string",
+      "title": "Pasta Enviados",
+      "description": "Vazio = detectar automaticamente",
+      "default": ""
+    },
+    "attach_dir": {
+      "type": "directory",
+      "title": "Pasta para anexos (opcional)",
+      "description": "Vazio = pasta temporária do usuário (%TEMP%\\imap-mail-mcp no Windows, /tmp/imap-mail-mcp no Linux/macOS)",
+      "required": false
+    },
+    "tls_verify": {
+      "type": "boolean",
+      "title": "Validar certificado TLS",
+      "description": "Desmarque apenas para servidor interno com certificado self-signed",
+      "default": true
+    },
+    "accounts_file": {
+      "type": "file",
+      "title": "Arquivo de contas adicionais (opcional)",
+      "description": "JSON com [{\"name\":\"financeiro\",\"user\":\"fin@empresa.com.br\",\"password\":\"...\"}, ...]. Campos omitidos herdam da conta principal. Veja accounts.example.json no repositório.",
+      "required": false
+    }
+  },
+  "homepage": "https://github.com/julioc-barros/imap-mail-mcp"
 }

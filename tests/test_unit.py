@@ -39,6 +39,44 @@ def test_build_search_literal_last():
 
 
 def test_compose_html_with_reply_headers():
-    m = s._compose("a@b.com; c@d.com", "T", "<b>oi</b>", html=True, in_reply_to="<x@y>", references="<w@y> <x@y>")
+    m = s._compose(s._acct(), "a@b.com; c@d.com", "T", "<b>oi</b>", html=True, in_reply_to="<x@y>", references="<w@y> <x@y>")
     assert m["To"] == "a@b.com, c@d.com"
     assert m["In-Reply-To"] == "<x@y>" and m.get_content_type() == "multipart/alternative"
+
+
+def test_from_addr_fallbacks():
+    a = s.Account("x", {"user": "julio@kropneus.com", "from": "Julio Barros"})
+    assert a.from_addr() == "Julio Barros <julio@kropneus.com>"
+    a = s.Account("x", {"user": "julio@kropneus.com", "from": ""})
+    assert a.from_addr() == "julio@kropneus.com"
+    a = s.Account("x", {"user": "julio", "from": "Julio <j@k.com>"})
+    assert a.from_addr() == "Julio <j@k.com>"
+
+
+def test_expand_path(monkeypatch):
+    home = str(s.Path.home())
+    assert s._expand_path("${HOME}/anexos") == str(s.Path(home) / "anexos")
+    assert s._expand_path("~/anexos") == str(s.Path(home) / "anexos")
+    assert s._expand_path("%USERPROFILE%/anexos") == str(s.Path(home) / "anexos")
+    import tempfile
+    assert s._expand_path("") == str(s.Path(tempfile.gettempdir()) / "imap-mail-mcp")
+    assert s._expand_path("%TEMP%/x") == str(s.Path(tempfile.gettempdir()) / "x")
+
+
+def test_extra_accounts_inherit(monkeypatch):
+    monkeypatch.setenv("MAIL_ACCOUNTS", '[{"name":"financeiro","user":"fin@x.com","password":"p2"},'
+                                        '{"name":"outro","user":"o@y.com","password":"p3","imap_host":"imap.y.com"}]')
+    accts = s._load_accounts()
+    assert list(accts) == ["principal", "financeiro", "outro"]
+    assert accts["financeiro"].imap_host == "x" and accts["financeiro"].password == "p2"
+    assert accts["outro"].imap_host == "imap.y.com" and accts["outro"].smtp_host == "x"
+
+
+def test_acct_lookup_by_email(monkeypatch):
+    monkeypatch.setattr(s, "ACCOUNTS", {"principal": s.Account("principal", {"user": "u@x.com", "password": "p"})})
+    monkeypatch.setattr(s, "DEFAULT_ACCOUNT", "principal")
+    assert s._acct("U@X.COM").name == "principal"
+    assert s._acct("").name == "principal"
+    import pytest
+    with pytest.raises(ValueError):
+        s._acct("nada")

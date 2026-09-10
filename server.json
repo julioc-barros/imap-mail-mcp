@@ -1,28 +1,93 @@
 {
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-09-29/server.schema.json",
-  "name": "io.github.SEU-USUARIO/imap-mail-mcp",
+  "name": "io.github.julioc-barros/imap-mail-mcp",
   "description": "MCP server for any IMAP/SMTP mail account: read, search, send, reply, forward, move, flags, folders, attachments.",
-  "version": "0.1.0",
-  "repository": { "url": "https://github.com/SEU-USUARIO/imap-mail-mcp", "source": "github" },
+  "version": "0.2.0",
+  "repository": {
+    "url": "https://github.com/julioc-barros/imap-mail-mcp",
+    "source": "github"
+  },
   "packages": [
     {
       "registryType": "pypi",
       "identifier": "imap-mail-mcp",
-      "version": "0.1.0",
-      "transport": { "type": "stdio" },
+      "version": "0.2.0",
+      "transport": {
+        "type": "stdio"
+      },
       "environmentVariables": [
-        { "name": "IMAP_HOST", "description": "IMAP server host", "isRequired": true },
-        { "name": "IMAP_PORT", "description": "993 (SSL) or 143 (STARTTLS)", "default": "993" },
-        { "name": "IMAP_SSL", "description": "true = implicit SSL, false = STARTTLS", "default": "true" },
-        { "name": "SMTP_HOST", "description": "SMTP server host", "isRequired": true },
-        { "name": "SMTP_PORT", "description": "587 / 465 / 25", "default": "587" },
-        { "name": "SMTP_SECURITY", "description": "starttls | ssl | none", "default": "starttls" },
-        { "name": "MAIL_USER", "description": "Account login", "isRequired": true },
-        { "name": "MAIL_PASS", "description": "Account or app password", "isRequired": true, "isSecret": true },
-        { "name": "MAIL_FROM", "description": "From header, e.g. Name <you@example.com>" },
-        { "name": "SENT_FOLDER", "description": "Sent folder name (auto-detected if empty)" },
-        { "name": "ATTACH_DIR", "description": "Where downloaded attachments are saved" },
-        { "name": "TLS_VERIFY", "description": "false only for self-signed internal servers", "default": "true" }
+        {
+          "name": "IMAP_HOST",
+          "description": "IMAP server host",
+          "isRequired": true
+        },
+        {
+          "name": "IMAP_PORT",
+          "description": "993 (SSL) or 143 (STARTTLS)",
+          "default": "993"
+        },
+        {
+          "name": "IMAP_SSL",
+          "description": "true = implicit SSL, false = STARTTLS",
+          "default": "true"
+        },
+        {
+          "name": "SMTP_HOST",
+          "description": "SMTP server host",
+          "isRequired": true
+        },
+        {
+          "name": "SMTP_PORT",
+          "description": "587 / 465 / 25",
+          "default": "587"
+        },
+        {
+          "name": "SMTP_SECURITY",
+          "description": "starttls | ssl | none",
+          "default": "starttls"
+        },
+        {
+          "name": "MAIL_USER",
+          "description": "Account login",
+          "isRequired": true
+        },
+        {
+          "name": "MAIL_PASS",
+          "description": "Account or app password",
+          "isRequired": true,
+          "isSecret": true
+        },
+        {
+          "name": "MAIL_FROM",
+          "description": "From header, e.g. Name <you@example.com>"
+        },
+        {
+          "name": "SENT_FOLDER",
+          "description": "Sent folder name (auto-detected if empty)"
+        },
+        {
+          "name": "ATTACH_DIR",
+          "description": "Where downloaded attachments are saved (default: user temp dir/imap-mail-mcp)"
+        },
+        {
+          "name": "TLS_VERIFY",
+          "description": "false only for self-signed internal servers",
+          "default": "true"
+        },
+        {
+          "name": "MAIL_ACCOUNT_NAME",
+          "description": "Name of the primary account",
+          "default": "principal"
+        },
+        {
+          "name": "MAIL_ACCOUNTS",
+          "description": "JSON array with extra accounts (fields omitted inherit from the primary)",
+          "isSecret": true
+        },
+        {
+          "name": "MAIL_ACCOUNTS_FILE",
+          "description": "Path to a JSON file with extra accounts"
+        }
       ]
     }
   ]

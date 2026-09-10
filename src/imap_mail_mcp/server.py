@@ -12,13 +12,14 @@ from __future__ import annotations
 
 import base64
 import imaplib
+import json
 import mimetypes
 import os
 import re
 import smtplib
 import ssl
 import sys
-import uuid
+import tempfile
 from contextlib import contextmanager
 from datetime import datetime
 from email import message_from_bytes, policy
@@ -34,47 +35,180 @@ except ImportError:  # mcp 1.x
     from mcp.server.fastmcp import FastMCP as _Server  # type: ignore
 
 # ---------------------------------------------------------------------------
-# Configuração
+# Configuração / contas
 # ---------------------------------------------------------------------------
+#
+# Conta principal: variáveis IMAP_HOST, SMTP_HOST, MAIL_USER, MAIL_PASS...
+# Contas adicionais: MAIL_ACCOUNTS (JSON inline) e/ou MAIL_ACCOUNTS_FILE
+# (caminho para um JSON). Cada entrada é um objeto com "name" e, opcionalmente,
+# imap_host, imap_port, imap_ssl, smtp_host, smtp_port, smtp_security, user,
+# password, from, sent_folder, attach_dir, tls_verify. Campos omitidos herdam
+# da conta principal (útil para várias caixas no mesmo servidor).
 
 
 def _env(name: str, default: str = "") -> str:
     return os.environ.get(name, default).strip()
 
 
-def _env_bool(name: str, default: bool) -> bool:
-    v = _env(name)
-    return default if not v else v.lower() in ("1", "true", "yes", "on")
+def _to_bool(v: Any, default: bool) -> bool:
+    if isinstance(v, bool):
+        return v
+    s = str(v or "").strip().lower()
+    return default if not s else s in ("1", "true", "yes", "on")
 
 
-CFG = {
-    "imap_host": _env("IMAP_HOST"),
-    "imap_port": int(_env("IMAP_PORT", "993")),
-    "imap_ssl": _env_bool("IMAP_SSL", True),          # False => STARTTLS na 143
-    "smtp_host": _env("SMTP_HOST"),
-    "smtp_port": int(_env("SMTP_PORT", "587")),
-    "smtp_security": _env("SMTP_SECURITY", "starttls").lower(),  # starttls | ssl | none
-    "user": _env("MAIL_USER"),
-    "password": _env("MAIL_PASS"),
-    "from": _env("MAIL_FROM"),                        # "Nome <email>" ou vazio => MAIL_USER
-    "sent_folder": _env("SENT_FOLDER"),               # auto-detecta se vazio
-    "attach_dir": _env("ATTACH_DIR", str(Path.home() / "mcp-mail-attachments")),
-    "verify_tls": _env_bool("TLS_VERIFY", True),
-    "max_body_chars": int(_env("MAX_BODY_CHARS", "20000")),
-}
+def _default_attach_dir() -> str:
+    """Pasta temporária do usuário: %TEMP%\imap-mail-mcp no Windows, /tmp/imap-mail-mcp (ou $TMPDIR) no Linux/macOS."""
+    return str(Path(tempfile.gettempdir()) / "imap-mail-mcp")
 
+
+def _expand_path(p: str) -> str:
+    """Expande ~, $HOME, ${HOME}, %USERPROFILE%, %TEMP% etc. Vazio = pasta temporária do usuário."""
+    p = (p or "").strip()
+    if not p:
+        return _default_attach_dir()
+    p = p.replace("%TEMP%", tempfile.gettempdir()).replace("${TEMP}", tempfile.gettempdir())
+    p = p.replace("${HOME}", "~").replace("$HOME", "~").replace("%USERPROFILE%", "~")
+    p = os.path.expandvars(p)
+    return str(Path(p).expanduser())
+
+
+MAX_BODY_CHARS = int(_env("MAX_BODY_CHARS", "20000") or 20000)
 imaplib._MAXLINE = 10_000_000  # anexos grandes nas respostas FETCH
 
 
-def _require(*keys: str) -> None:
-    missing = [k for k in keys if not CFG.get(k)]
-    if missing:
-        raise RuntimeError(f"Configuração ausente: {', '.join(k.upper() for k in missing)}")
+class Account:
+    """Uma conta de e-mail (IMAP + SMTP)."""
+
+    FIELDS = ("imap_host", "imap_port", "imap_ssl", "smtp_host", "smtp_port", "smtp_security",
+              "user", "password", "from_", "sent_folder", "attach_dir", "tls_verify")
+
+    def __init__(self, name: str, data: dict, base: Optional["Account"] = None) -> None:
+        self.name = name
+
+        def pick(key: str, default: Any) -> Any:
+            for k in (key, key.rstrip("_")):
+                if k in data and data[k] not in (None, ""):
+                    return data[k]
+            return getattr(base, key) if base is not None else default
+
+        self.imap_host: str = str(pick("imap_host", ""))
+        self.imap_port: int = int(pick("imap_port", 993) or 993)
+        self.imap_ssl: bool = _to_bool(pick("imap_ssl", True), True)
+        self.smtp_host: str = str(pick("smtp_host", ""))
+        self.smtp_port: int = int(pick("smtp_port", 587) or 587)
+        self.smtp_security: str = str(pick("smtp_security", "starttls")).lower()
+        self.user: str = str(pick("user", ""))
+        self.password: str = str(pick("password", ""))
+        self.from_: str = str(pick("from_", ""))
+        self.sent_folder: str = str(pick("sent_folder", ""))
+        self.attach_dir: str = _expand_path(str(pick("attach_dir", "")))
+        self.tls_verify: bool = _to_bool(pick("tls_verify", True), True)
+        # a herança de user/password de outra conta não faz sentido
+        if base is not None and "user" not in data:
+            raise ValueError(f"Conta '{name}': campo 'user' é obrigatório.")
+
+    def require_imap(self) -> None:
+        missing = [k for k in ("imap_host", "user", "password") if not getattr(self, k)]
+        if missing:
+            raise RuntimeError(f"Conta '{self.name}': configuração ausente: {', '.join(missing)}")
+
+    def require_smtp(self) -> None:
+        missing = [k for k in ("smtp_host", "user", "password") if not getattr(self, k)]
+        if missing:
+            raise RuntimeError(f"Conta '{self.name}': configuração ausente: {', '.join(missing)}")
+
+    def from_addr(self) -> str:
+        """Header From válido. Aceita 'Nome <x@y>', 'x@y' ou só 'Nome' (usa MAIL_USER como endereço)."""
+        raw = self.from_.strip()
+        name, addr = parseaddr(raw) if raw else ("", "")
+        if not addr or "@" not in addr:
+            addr = self.user if "@" in self.user else ""
+            name = name or raw
+        if not addr:
+            return self.user
+        return formataddr((name, addr)) if name else addr
+
+    def info(self) -> dict:
+        return {
+            "name": self.name,
+            "user": self.user,
+            "from": self.from_addr(),
+            "imap": f"{self.imap_host}:{self.imap_port} ({'SSL' if self.imap_ssl else 'STARTTLS'})",
+            "smtp": f"{self.smtp_host}:{self.smtp_port} ({self.smtp_security})",
+            "attach_dir": self.attach_dir,
+            "tls_verify": self.tls_verify,
+        }
 
 
-def _ssl_ctx() -> ssl.SSLContext:
+def _load_accounts() -> dict[str, Account]:
+    primary_name = _env("MAIL_ACCOUNT_NAME") or "principal"
+    primary = Account(primary_name, {
+        "imap_host": _env("IMAP_HOST"), "imap_port": _env("IMAP_PORT"), "imap_ssl": _env("IMAP_SSL"),
+        "smtp_host": _env("SMTP_HOST"), "smtp_port": _env("SMTP_PORT"), "smtp_security": _env("SMTP_SECURITY"),
+        "user": _env("MAIL_USER"), "password": _env("MAIL_PASS"), "from": _env("MAIL_FROM"),
+        "sent_folder": _env("SENT_FOLDER"), "attach_dir": _env("ATTACH_DIR"), "tls_verify": _env("TLS_VERIFY"),
+    })
+    accounts: dict[str, Account] = {}
+    if primary.user:
+        accounts[primary.name] = primary
+
+    extra: list[dict] = []
+    for src, raw in (("MAIL_ACCOUNTS", _env("MAIL_ACCOUNTS")), ("MAIL_ACCOUNTS_FILE", "")):
+        if src == "MAIL_ACCOUNTS_FILE":
+            path = _env("MAIL_ACCOUNTS_FILE")
+            if not path:
+                continue
+            try:
+                raw = Path(_expand_path(path)).read_text(encoding="utf-8")
+            except OSError as e:
+                print(f"[imap-mail] aviso: não foi possível ler {path}: {e}", file=sys.stderr)
+                continue
+        if not raw:
+            continue
+        try:
+            data = json.loads(raw)
+        except json.JSONDecodeError as e:
+            print(f"[imap-mail] aviso: {src} não é JSON válido: {e}", file=sys.stderr)
+            continue
+        if isinstance(data, dict) and "accounts" in data:
+            data = data["accounts"]
+        if isinstance(data, dict):  # {"nome": {...}, ...}
+            data = [dict(v, name=k) for k, v in data.items()]
+        extra.extend(d for d in data if isinstance(d, dict))
+
+    for i, d in enumerate(extra, 1):
+        name = str(d.get("name") or d.get("user") or f"conta{i}")
+        try:
+            accounts[name] = Account(name, d, base=primary if primary.user else None)
+        except ValueError as e:
+            print(f"[imap-mail] aviso: {e}", file=sys.stderr)
+
+    if not accounts:
+        raise RuntimeError("Nenhuma conta configurada. Defina MAIL_USER/MAIL_PASS/IMAP_HOST ou MAIL_ACCOUNTS.")
+    return accounts
+
+
+ACCOUNTS: dict[str, Account] = _load_accounts()
+DEFAULT_ACCOUNT: str = next(iter(ACCOUNTS))
+
+
+def _acct(name: str = "") -> Account:
+    """Resolve o nome (ou e-mail) de uma conta; vazio = conta padrão."""
+    if not name:
+        return ACCOUNTS[DEFAULT_ACCOUNT]
+    if name in ACCOUNTS:
+        return ACCOUNTS[name]
+    low = name.lower()
+    for a in ACCOUNTS.values():
+        if a.name.lower() == low or a.user.lower() == low:
+            return a
+    raise ValueError(f"Conta '{name}' não encontrada. Disponíveis: {', '.join(ACCOUNTS)}")
+
+
+def _ssl_ctx(acct: Account) -> ssl.SSLContext:
     ctx = ssl.create_default_context()
-    if not CFG["verify_tls"]:
+    if not acct.tls_verify:
         ctx.check_hostname = False
         ctx.verify_mode = ssl.CERT_NONE
     return ctx
@@ -134,18 +268,18 @@ def _check(res: tuple, action: str) -> Any:
 
 
 @contextmanager
-def imap_conn(folder: Optional[str] = None, readonly: bool = False) -> Iterator[imaplib.IMAP4]:
-    _require("imap_host", "user", "password")
-    if CFG["imap_ssl"]:
-        conn: imaplib.IMAP4 = imaplib.IMAP4_SSL(CFG["imap_host"], CFG["imap_port"], ssl_context=_ssl_ctx())
+def imap_conn(acct: Account, folder: Optional[str] = None, readonly: bool = False) -> Iterator[imaplib.IMAP4]:
+    acct.require_imap()
+    if acct.imap_ssl:
+        conn: imaplib.IMAP4 = imaplib.IMAP4_SSL(acct.imap_host, acct.imap_port, ssl_context=_ssl_ctx(acct))
     else:
-        conn = imaplib.IMAP4(CFG["imap_host"], CFG["imap_port"])
+        conn = imaplib.IMAP4(acct.imap_host, acct.imap_port)
         try:
-            conn.starttls(_ssl_ctx())
+            conn.starttls(_ssl_ctx(acct))
         except Exception:
             pass  # servidor sem STARTTLS
     try:
-        conn.login(CFG["user"], CFG["password"])
+        conn.login(acct.user, acct.password)
         try:
             conn.enable("UTF8=ACCEPT")
         except Exception:
@@ -194,9 +328,9 @@ def _list_folders(conn: imaplib.IMAP4) -> list[dict]:
     return out
 
 
-def _find_sent_folder(conn: imaplib.IMAP4) -> Optional[str]:
-    if CFG["sent_folder"]:
-        return CFG["sent_folder"]
+def _find_sent_folder(acct: Account, conn: imaplib.IMAP4) -> Optional[str]:
+    if acct.sent_folder:
+        return acct.sent_folder
     folders = _list_folders(conn)
     for f in folders:
         if "\\Sent" in f["flags"]:
@@ -351,19 +485,15 @@ def _search(conn: imaplib.IMAP4, criteria: str, literal: Optional[bytes]) -> lis
 # ---------------------------------------------------------------------------
 
 
-def _from_addr() -> str:
-    return CFG["from"] or CFG["user"]
-
-
 def _split_addrs(s: str) -> list[str]:
     return [a.strip() for a in re.split(r"[;,]", s or "") if a.strip()]
 
 
-def _compose(to: str, subject: str, body: str, cc: str = "", bcc: str = "", html: bool = False,
+def _compose(acct: Account, to: str, subject: str, body: str, cc: str = "", bcc: str = "", html: bool = False,
              attachments: Optional[list[str]] = None, in_reply_to: str = "",
              references: str = "", reply_to: str = "") -> EmailMessage:
     msg = EmailMessage()
-    msg["From"] = _from_addr()
+    msg["From"] = acct.from_addr()
     msg["To"] = ", ".join(_split_addrs(to))
     if cc:
         msg["Cc"] = ", ".join(_split_addrs(cc))
@@ -371,7 +501,7 @@ def _compose(to: str, subject: str, body: str, cc: str = "", bcc: str = "", html
         msg["Bcc"] = ", ".join(_split_addrs(bcc))
     msg["Subject"] = subject
     msg["Date"] = formatdate(localtime=True)
-    msg["Message-ID"] = make_msgid(domain=parseaddr(_from_addr())[1].split("@")[-1] or None)
+    msg["Message-ID"] = make_msgid(domain=parseaddr(acct.from_addr())[1].split("@")[-1] or None)
     if reply_to:
         msg["Reply-To"] = reply_to
     if in_reply_to:
@@ -395,30 +525,30 @@ def _compose(to: str, subject: str, body: str, cc: str = "", bcc: str = "", html
     return msg
 
 
-def _smtp_send(msg: EmailMessage) -> None:
-    _require("smtp_host", "user", "password")
-    sec = CFG["smtp_security"]
+def _smtp_send(acct: Account, msg: EmailMessage) -> None:
+    acct.require_smtp()
+    sec = acct.smtp_security
     if sec == "ssl":
-        server: smtplib.SMTP = smtplib.SMTP_SSL(CFG["smtp_host"], CFG["smtp_port"], context=_ssl_ctx(), timeout=60)
+        server: smtplib.SMTP = smtplib.SMTP_SSL(acct.smtp_host, acct.smtp_port, context=_ssl_ctx(acct), timeout=60)
     else:
-        server = smtplib.SMTP(CFG["smtp_host"], CFG["smtp_port"], timeout=60)
+        server = smtplib.SMTP(acct.smtp_host, acct.smtp_port, timeout=60)
     with server:
         server.ehlo()
         if sec == "starttls":
-            server.starttls(context=_ssl_ctx())
+            server.starttls(context=_ssl_ctx(acct))
             server.ehlo()
-        if sec != "none" or CFG["password"]:
+        if sec != "none" or acct.password:
             try:
-                server.login(CFG["user"], CFG["password"])
+                server.login(acct.user, acct.password)
             except smtplib.SMTPNotSupportedError:
                 pass
         server.send_message(msg)
 
 
-def _append_sent(msg: EmailMessage) -> Optional[str]:
+def _append_sent(acct: Account, msg: EmailMessage) -> Optional[str]:
     try:
-        with imap_conn() as conn:
-            folder = _find_sent_folder(conn)
+        with imap_conn(acct) as conn:
+            folder = _find_sent_folder(acct, conn)
             if not folder:
                 return None
             conn.append(_quote(folder), "(\\Seen)", imaplib.Time2Internaldate(datetime.now().timestamp()), msg.as_bytes())
@@ -435,17 +565,37 @@ def _append_sent(msg: EmailMessage) -> Optional[str]:
 mcp = _Server(
     "imap-mail",
     instructions=(
-        "Cliente de e-mail IMAP/SMTP. Use list_folders para ver pastas, search_emails "
-        "para localizar mensagens (retorna UIDs), read_email para ler o conteúdo pelo UID, "
-        "send_email/reply_email para enviar. UIDs são estáveis dentro de cada pasta."
+        "Cliente de e-mail IMAP/SMTP com suporte a várias contas. Use list_accounts para ver as contas; "
+        "todas as ferramentas aceitam o parâmetro opcional `account` (nome ou e-mail da conta; vazio = conta padrão). "
+        "Fluxo típico: list_folders → search_emails (retorna UIDs) → read_email → reply_email/send_email. "
+        "search_all_accounts busca em todas as caixas de uma vez. UIDs são estáveis dentro de cada pasta de cada conta."
     ),
 )
 
 
+
 @mcp.tool()
-def list_folders(with_counts: bool = False) -> list[dict]:
-    """Lista todas as pastas (mailboxes) da conta. Com with_counts=True inclui total e não lidos (mais lento)."""
-    with imap_conn() as conn:
+def list_accounts() -> dict:
+    """Lista as contas de e-mail configuradas e qual é a padrão."""
+    return {"default": DEFAULT_ACCOUNT, "accounts": [a.info() for a in ACCOUNTS.values()]}
+
+
+@mcp.tool()
+def account_info(account: str = "") -> dict:
+    """Mostra a configuração ativa de uma conta (sem senha), capacidades do servidor IMAP e a pasta de Enviados detectada."""
+    acct = _acct(account)
+    with imap_conn(acct) as conn:
+        caps = sorted(conn.capabilities)
+        sent = _find_sent_folder(acct, conn)
+    return dict(acct.info(), sent_folder=sent, imap_capabilities=caps)
+
+
+@mcp.tool()
+def list_folders(account: str = "", with_counts: bool = False) -> list[dict]:
+    """Lista todas as pastas (mailboxes) de uma conta. Com with_counts=True inclui total e não lidos (mais lento).
+    account: nome ou e-mail da conta; vazio = conta padrão."""
+    acct = _acct(account)
+    with imap_conn(acct) as conn:
         folders = _list_folders(conn)
         if with_counts:
             for f in folders:
@@ -454,8 +604,8 @@ def list_folders(with_counts: bool = False) -> list[dict]:
                 try:
                     typ, data = conn.status(_quote(f["name"]), "(MESSAGES UNSEEN)")
                     if typ == "OK" and data and data[0]:
-                        s = data[0].decode(errors="replace")
-                        m1, m2 = re.search(r"MESSAGES (\d+)", s), re.search(r"UNSEEN (\d+)", s)
+                        st = data[0].decode(errors="replace")
+                        m1, m2 = re.search(r"MESSAGES (\d+)", st), re.search(r"UNSEEN (\d+)", st)
                         f["messages"] = int(m1.group(1)) if m1 else None
                         f["unseen"] = int(m2.group(1)) if m2 else None
                 except Exception:
@@ -465,8 +615,23 @@ def list_folders(with_counts: bool = False) -> list[dict]:
         return folders
 
 
+def _do_search(acct: Account, folder: str, unseen: bool, flagged: bool, sender: str, to: str, subject: str,
+               text: str, since: str, before: str, larger_than_kb: int, limit: int, raw_criteria: str) -> dict:
+    with imap_conn(acct, folder, readonly=True) as conn:
+        if raw_criteria:
+            uids = _search(conn, raw_criteria, None)
+        else:
+            crit, lit = _build_search(unseen, flagged, sender, to, subject, text, since, before, larger_than_kb)
+            uids = _search(conn, crit, lit)
+        total = len(uids)
+        uids = uids[-max(1, min(limit, 200)):][::-1]
+        return {"account": acct.name, "folder": folder, "total_matches": total, "returned": len(uids),
+                "emails": _fetch_summaries(conn, uids)}
+
+
 @mcp.tool()
 def search_emails(
+    account: str = "",
     folder: str = "INBOX",
     unseen: bool = False,
     flagged: bool = False,
@@ -480,31 +645,53 @@ def search_emails(
     limit: int = 20,
     raw_criteria: str = "",
 ) -> dict:
-    """Busca e-mails em uma pasta. Retorna os mais recentes primeiro com UID, remetente, assunto, data e flags.
-    Datas no formato YYYY-MM-DD. raw_criteria permite passar critério IMAP SEARCH direto (ex.: 'UNSEEN FROM "x"'), ignorando os demais filtros.
+    """Busca e-mails em uma pasta de uma conta. Retorna os mais recentes primeiro com UID, remetente, assunto, data e flags.
+    account: nome ou e-mail da conta; vazio = conta padrão. Datas no formato YYYY-MM-DD.
+    raw_criteria permite passar critério IMAP SEARCH direto (ex.: 'UNSEEN FROM "x"'), ignorando os demais filtros.
     Os filtros sender/to/subject/text são substring, case-insensitive."""
-    with imap_conn(folder, readonly=True) as conn:
-        if raw_criteria:
-            uids = _search(conn, raw_criteria, None)
-        else:
-            crit, lit = _build_search(unseen, flagged, sender, to, subject, text, since, before, larger_than_kb)
-            uids = _search(conn, crit, lit)
-        total = len(uids)
-        uids = uids[-max(1, min(limit, 200)):][::-1]
-        return {"folder": folder, "total_matches": total, "returned": len(uids), "emails": _fetch_summaries(conn, uids)}
+    return _do_search(_acct(account), folder, unseen, flagged, sender, to, subject, text, since, before,
+                      larger_than_kb, limit, raw_criteria)
 
 
 @mcp.tool()
-def read_email(folder: str, uid: int, prefer_html: bool = False, mark_as_read: bool = True, max_chars: int = 0) -> dict:
+def search_all_accounts(
+    folder: str = "INBOX",
+    unseen: bool = False,
+    flagged: bool = False,
+    sender: str = "",
+    to: str = "",
+    subject: str = "",
+    text: str = "",
+    since: str = "",
+    before: str = "",
+    limit_per_account: int = 10,
+) -> dict:
+    """Executa a mesma busca em TODAS as contas configuradas (mesma pasta em cada uma) e devolve os resultados agrupados por conta.
+    Útil para 'o que chegou de novo em todas as caixas'. Erros de uma conta não interrompem as demais."""
+    results = []
+    for acct in ACCOUNTS.values():
+        try:
+            results.append(_do_search(acct, folder, unseen, flagged, sender, to, subject, text, since, before,
+                                      0, limit_per_account, ""))
+        except Exception as e:
+            results.append({"account": acct.name, "folder": folder, "error": str(e)})
+    return {"accounts": results}
+
+
+@mcp.tool()
+def read_email(folder: str, uid: int, account: str = "", prefer_html: bool = False,
+               mark_as_read: bool = True, max_chars: int = 0) -> dict:
     """Lê um e-mail completo pelo UID: cabeçalhos, corpo (texto por padrão, ou HTML) e lista de anexos.
-    Use download_attachment para salvar anexos. max_chars=0 usa o limite padrão (MAX_BODY_CHARS)."""
-    with imap_conn(folder, readonly=not mark_as_read) as conn:
+    account: nome ou e-mail da conta; vazio = conta padrão. Use download_attachment para salvar anexos.
+    max_chars=0 usa o limite padrão (MAX_BODY_CHARS)."""
+    acct = _acct(account)
+    with imap_conn(acct, folder, readonly=not mark_as_read) as conn:
         raw = _fetch_raw(conn, uid, peek=not mark_as_read)
     msg = message_from_bytes(raw, policy=policy.default)
     body, kind = _body_text(msg, prefer_html)
-    limit = max_chars or CFG["max_body_chars"]
-    truncated = len(body) > limit
+    limit = max_chars or MAX_BODY_CHARS
     return {
+        "account": acct.name,
         "uid": uid,
         "folder": folder,
         "message_id": str(msg["Message-ID"] or ""),
@@ -517,28 +704,29 @@ def read_email(folder: str, uid: int, prefer_html: bool = False, mark_as_read: b
         "subject": _decode_hdr(msg["Subject"]),
         "body_type": kind,
         "body": body[:limit],
-        "body_truncated": truncated,
+        "body_truncated": len(body) > limit,
         "attachments": [{"index": i, "filename": n, "content_type": t, "size": s} for i, n, t, s in _attachments(msg)],
     }
 
 
 @mcp.tool()
-def get_raw_email(folder: str, uid: int, max_chars: int = 50000) -> str:
+def get_raw_email(folder: str, uid: int, account: str = "", max_chars: int = 50000) -> str:
     """Retorna a fonte RFC822 completa da mensagem (cabeçalhos brutos + MIME). Útil para diagnóstico."""
-    with imap_conn(folder, readonly=True) as conn:
+    with imap_conn(_acct(account), folder, readonly=True) as conn:
         raw = _fetch_raw(conn, uid)
     txt = raw.decode("utf-8", errors="replace")
     return txt[:max_chars] + ("\n...[truncado]" if len(txt) > max_chars else "")
 
 
 @mcp.tool()
-def download_attachment(folder: str, uid: int, index: int = -1, dest_dir: str = "") -> list[dict]:
+def download_attachment(folder: str, uid: int, account: str = "", index: int = -1, dest_dir: str = "") -> list[dict]:
     """Salva anexos de um e-mail em disco. index=-1 salva todos; caso contrário salva só o anexo indicado
-    (índice conforme read_email). Retorna os caminhos gravados."""
-    with imap_conn(folder, readonly=True) as conn:
+    (índice conforme read_email). dest_dir vazio usa a pasta de anexos da conta. Retorna os caminhos gravados."""
+    acct = _acct(account)
+    with imap_conn(acct, folder, readonly=True) as conn:
         raw = _fetch_raw(conn, uid)
     msg = message_from_bytes(raw, policy=policy.default)
-    base = Path(dest_dir or CFG["attach_dir"]).expanduser()
+    base = Path(_expand_path(dest_dir) if dest_dir else acct.attach_dir)
     base.mkdir(parents=True, exist_ok=True)
     saved = []
     for i, part in enumerate(msg.iter_attachments()):
@@ -558,6 +746,7 @@ def send_email(
     to: str,
     subject: str,
     body: str,
+    account: str = "",
     cc: str = "",
     bcc: str = "",
     html: bool = False,
@@ -565,13 +754,15 @@ def send_email(
     reply_to: str = "",
     save_to_sent: bool = True,
 ) -> dict:
-    """Envia um e-mail via SMTP. Destinatários separados por vírgula ou ponto-e-vírgula.
-    html=True trata body como HTML. attachments = lista de caminhos locais.
-    Grava cópia na pasta Enviados via IMAP quando save_to_sent=True."""
-    msg = _compose(to, subject, body, cc, bcc, html, attachments, reply_to=reply_to)
-    _smtp_send(msg)
-    sent = _append_sent(msg) if save_to_sent else None
-    return {"status": "enviado", "message_id": msg["Message-ID"], "to": msg["To"], "saved_in": sent}
+    """Envia um e-mail via SMTP pela conta indicada (account vazio = conta padrão).
+    Destinatários separados por vírgula ou ponto-e-vírgula. html=True trata body como HTML.
+    attachments = lista de caminhos locais. Grava cópia na pasta Enviados via IMAP quando save_to_sent=True."""
+    acct = _acct(account)
+    msg = _compose(acct, to, subject, body, cc, bcc, html, attachments, reply_to=reply_to)
+    _smtp_send(acct, msg)
+    sent = _append_sent(acct, msg) if save_to_sent else None
+    return {"status": "enviado", "account": acct.name, "from": msg["From"], "message_id": msg["Message-ID"],
+            "to": msg["To"], "saved_in": sent}
 
 
 @mcp.tool()
@@ -579,17 +770,20 @@ def reply_email(
     folder: str,
     uid: int,
     body: str,
+    account: str = "",
     reply_all: bool = False,
     html: bool = False,
     attachments: Optional[list[str]] = None,
     quote_original: bool = True,
     save_to_sent: bool = True,
 ) -> dict:
-    """Responde um e-mail existente mantendo o encadeamento (In-Reply-To/References) e marca-o como respondido."""
-    with imap_conn(folder) as conn:
+    """Responde um e-mail existente mantendo o encadeamento (In-Reply-To/References) e marca-o como respondido.
+    account: nome ou e-mail da conta onde o e-mail está; vazio = conta padrão."""
+    acct = _acct(account)
+    with imap_conn(acct, folder) as conn:
         raw = _fetch_raw(conn, uid)
         orig = message_from_bytes(raw, policy=policy.default)
-        me = parseaddr(_from_addr())[1].lower()
+        me = parseaddr(acct.from_addr())[1].lower()
 
         reply_target = orig["Reply-To"] or orig["From"]
         to = _decode_hdr(reply_target)
@@ -609,23 +803,27 @@ def reply_email(
             otext, _ = _body_text(orig, prefer_html=False)
             quoted = "\n".join("> " + ln for ln in otext.splitlines())
             header = f"Em {_fmt_date(orig['Date'])}, {_decode_hdr(orig['From'])} escreveu:"
-            body = f"{body}\n\n{header}\n{quoted}" if not html else f"{body}<br><br><blockquote>{header}<br>{otext.replace(chr(10), '<br>')}</blockquote>"
+            body = (f"{body}\n\n{header}\n{quoted}" if not html
+                    else f"{body}<br><br><blockquote>{header}<br>{otext.replace(chr(10), '<br>')}</blockquote>")
 
-        msg = _compose(to, subj, body, cc=cc, html=html, attachments=attachments,
+        msg = _compose(acct, to, subj, body, cc=cc, html=html, attachments=attachments,
                        in_reply_to=str(orig["Message-ID"] or ""), references=refs)
-        _smtp_send(msg)
+        _smtp_send(acct, msg)
         try:
             conn.uid("STORE", str(uid), "+FLAGS", "(\\Answered)")
         except Exception:
             pass
-    sent = _append_sent(msg) if save_to_sent else None
-    return {"status": "enviado", "message_id": msg["Message-ID"], "to": msg["To"], "cc": msg["Cc"] or "", "saved_in": sent}
+    sent = _append_sent(acct, msg) if save_to_sent else None
+    return {"status": "enviado", "account": acct.name, "message_id": msg["Message-ID"], "to": msg["To"],
+            "cc": msg["Cc"] or "", "saved_in": sent}
 
 
 @mcp.tool()
-def forward_email(folder: str, uid: int, to: str, body: str = "", cc: str = "", include_attachments: bool = True, save_to_sent: bool = True) -> dict:
+def forward_email(folder: str, uid: int, to: str, account: str = "", body: str = "", cc: str = "",
+                  include_attachments: bool = True, save_to_sent: bool = True) -> dict:
     """Encaminha um e-mail (corpo em texto + anexos originais) para novos destinatários."""
-    with imap_conn(folder, readonly=True) as conn:
+    acct = _acct(account)
+    with imap_conn(acct, folder, readonly=True) as conn:
         raw = _fetch_raw(conn, uid)
     orig = message_from_bytes(raw, policy=policy.default)
     subj = _decode_hdr(orig["Subject"])
@@ -637,36 +835,39 @@ def forward_email(folder: str, uid: int, to: str, body: str = "", cc: str = "", 
         f"De: {_decode_hdr(orig['From'])}\nData: {_fmt_date(orig['Date'])}\n"
         f"Assunto: {_decode_hdr(orig['Subject'])}\nPara: {_decode_hdr(orig['To'])}\n\n{otext}"
     )
-    msg = _compose(to, subj, fwd, cc=cc)
+    msg = _compose(acct, to, subj, fwd, cc=cc)
     if include_attachments:
         for part in orig.iter_attachments():
             maintype, subtype = part.get_content_type().split("/", 1)
             msg.add_attachment(part.get_payload(decode=True) or b"", maintype=maintype, subtype=subtype,
                                filename=_decode_hdr(part.get_filename() or "anexo"))
-    _smtp_send(msg)
-    sent = _append_sent(msg) if save_to_sent else None
-    return {"status": "enviado", "message_id": msg["Message-ID"], "to": msg["To"], "saved_in": sent}
+    _smtp_send(acct, msg)
+    sent = _append_sent(acct, msg) if save_to_sent else None
+    return {"status": "enviado", "account": acct.name, "message_id": msg["Message-ID"], "to": msg["To"], "saved_in": sent}
 
 
 @mcp.tool()
-def set_flags(folder: str, uids: list[int], seen: Optional[bool] = None, flagged: Optional[bool] = None, answered: Optional[bool] = None) -> dict:
+def set_flags(folder: str, uids: list[int], account: str = "", seen: Optional[bool] = None,
+              flagged: Optional[bool] = None, answered: Optional[bool] = None) -> dict:
     """Marca/desmarca flags em um ou mais UIDs: seen (lido), flagged (estrela/importante), answered.
     Passe True para adicionar, False para remover, omita para não alterar."""
+    acct = _acct(account)
     changes = []
-    with imap_conn(folder) as conn:
+    with imap_conn(acct, folder) as conn:
         ids = ",".join(str(u) for u in uids)
         for flag, val in (("\\Seen", seen), ("\\Flagged", flagged), ("\\Answered", answered)):
             if val is None:
                 continue
             _check(conn.uid("STORE", ids, "+FLAGS" if val else "-FLAGS", f"({flag})"), "STORE")
             changes.append(("+" if val else "-") + flag)
-    return {"folder": folder, "uids": uids, "changes": changes}
+    return {"account": acct.name, "folder": folder, "uids": uids, "changes": changes}
 
 
 @mcp.tool()
-def move_email(folder: str, uids: list[int], destination: str) -> dict:
-    """Move e-mails para outra pasta (usa MOVE se o servidor suportar; senão COPY + delete + EXPUNGE)."""
-    with imap_conn(folder) as conn:
+def move_email(folder: str, uids: list[int], destination: str, account: str = "") -> dict:
+    """Move e-mails para outra pasta da mesma conta (usa MOVE se o servidor suportar; senão COPY + delete + EXPUNGE)."""
+    acct = _acct(account)
+    with imap_conn(acct, folder) as conn:
         ids = ",".join(str(u) for u in uids)
         dest = _quote(destination)
         if "MOVE" in conn.capabilities:
@@ -675,68 +876,55 @@ def move_email(folder: str, uids: list[int], destination: str) -> dict:
             _check(conn.uid("COPY", ids, dest), "COPY")
             _check(conn.uid("STORE", ids, "+FLAGS", "(\\Deleted)"), "STORE")
             conn.expunge()
-    return {"moved": uids, "from": folder, "to": destination}
+    return {"account": acct.name, "moved": uids, "from": folder, "to": destination}
 
 
 @mcp.tool()
-def delete_email(folder: str, uids: list[int], expunge: bool = True) -> dict:
+def delete_email(folder: str, uids: list[int], account: str = "", expunge: bool = True) -> dict:
     """Exclui e-mails (marca \\Deleted e, se expunge=True, remove definitivamente da pasta).
     Para 'mover para a lixeira' prefira move_email para a pasta Trash/Lixeira."""
-    with imap_conn(folder) as conn:
+    acct = _acct(account)
+    with imap_conn(acct, folder) as conn:
         ids = ",".join(str(u) for u in uids)
         _check(conn.uid("STORE", ids, "+FLAGS", "(\\Deleted)"), "STORE")
         if expunge:
             conn.expunge()
-    return {"deleted": uids, "folder": folder, "expunged": expunge}
+    return {"account": acct.name, "deleted": uids, "folder": folder, "expunged": expunge}
 
 
 @mcp.tool()
-def create_folder(name: str) -> dict:
+def create_folder(name: str, account: str = "") -> dict:
     """Cria uma pasta. Use o delimitador do servidor para subpastas (ex.: 'INBOX/Clientes' ou 'INBOX.Clientes')."""
-    with imap_conn() as conn:
+    acct = _acct(account)
+    with imap_conn(acct) as conn:
         _check(conn.create(_quote(name)), "CREATE")
         try:
             conn.subscribe(_quote(name))
         except Exception:
             pass
-    return {"created": name}
+    return {"account": acct.name, "created": name}
 
 
 @mcp.tool()
-def delete_folder(name: str) -> dict:
+def delete_folder(name: str, account: str = "") -> dict:
     """Remove uma pasta e todas as mensagens nela. Irreversível."""
-    with imap_conn() as conn:
+    acct = _acct(account)
+    with imap_conn(acct) as conn:
         try:
             conn.unsubscribe(_quote(name))
         except Exception:
             pass
         _check(conn.delete(_quote(name)), "DELETE")
-    return {"deleted": name}
+    return {"account": acct.name, "deleted": name}
 
 
 @mcp.tool()
-def rename_folder(name: str, new_name: str) -> dict:
+def rename_folder(name: str, new_name: str, account: str = "") -> dict:
     """Renomeia uma pasta."""
-    with imap_conn() as conn:
+    acct = _acct(account)
+    with imap_conn(acct) as conn:
         _check(conn.rename(_quote(name), _quote(new_name)), "RENAME")
-    return {"renamed": name, "to": new_name}
-
-
-@mcp.tool()
-def account_info() -> dict:
-    """Mostra a configuração ativa (sem senha), capacidades do servidor IMAP e a pasta de Enviados detectada."""
-    with imap_conn() as conn:
-        caps = sorted(conn.capabilities)
-        sent = _find_sent_folder(conn)
-    return {
-        "user": CFG["user"],
-        "from": _from_addr(),
-        "imap": f"{CFG['imap_host']}:{CFG['imap_port']} ({'SSL' if CFG['imap_ssl'] else 'STARTTLS'})",
-        "smtp": f"{CFG['smtp_host']}:{CFG['smtp_port']} ({CFG['smtp_security']})",
-        "sent_folder": sent,
-        "attach_dir": CFG["attach_dir"],
-        "imap_capabilities": caps,
-    }
+    return {"account": acct.name, "renamed": name, "to": new_name}
 
 
 def main() -> None:
