@@ -1,0 +1,45 @@
+# Dispara ao criar uma tag vX.Y.Z:
+#   git tag v0.1.0 && git push --tags
+# 1) publica no PyPI (Trusted Publishing: configure o projeto em pypi.org -> Publishing -> GitHub, workflow release.yml)
+# 2) gera o .mcpb e anexa ao GitHub Release
+name: Release
+on:
+  push:
+    tags: ["v*"]
+permissions:
+  contents: write
+  id-token: write
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Sync version from tag
+        run: |
+          V="${GITHUB_REF_NAME#v}"
+          sed -i "s/^version = \".*\"/version = \"$V\"/" pyproject.toml
+          sed -i "s/\"version\": \".*\"/\"version\": \"$V\"/" manifest.json
+          sed -i "s/__version__ = \".*\"/__version__ = \"$V\"/" src/imap_mail_mcp/__init__.py
+      - run: uv sync --group dev && uv run pytest -q
+      - run: uv build
+      - name: Pack MCPB
+        run: |
+          npx -y @anthropic-ai/mcpb validate manifest.json
+          npx -y @anthropic-ai/mcpb pack . dist/imap-mail-mcp-${GITHUB_REF_NAME#v}.mcpb
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist/
+          skip-existing: true
+      - name: GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/*.mcpb
+            dist/*.whl
+            dist/*.tar.gz
+          generate_release_notes: true
