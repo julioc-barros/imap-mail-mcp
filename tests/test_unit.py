@@ -80,3 +80,12 @@ def test_acct_lookup_by_email(monkeypatch):
     import pytest
     with pytest.raises(ValueError):
         s._acct("nada")
+
+
+def test_unresolved_placeholder_treated_as_empty(monkeypatch):
+    monkeypatch.setenv("ATTACH_DIR", "${user_config.attach_dir}")
+    monkeypatch.setenv("MAIL_FROM", "${user_config.mail_from}")
+    a = s._load_accounts()["principal"]
+    import tempfile
+    assert a.attach_dir == str(s.Path(tempfile.gettempdir()) / "imap-mail-mcp")
+    assert a.from_addr() == "u@x.com"

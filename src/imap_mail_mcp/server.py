@@ -46,8 +46,14 @@ except ImportError:  # mcp 1.x
 # da conta principal (útil para várias caixas no mesmo servidor).
 
 
+def _unresolved(v: Any) -> bool:
+    """Placeholder que o host não substituiu (ex.: '${user_config.attach_dir}' quando o campo fica vazio)."""
+    return isinstance(v, str) and v.strip().startswith("${") and v.strip().endswith("}")
+
+
 def _env(name: str, default: str = "") -> str:
-    return os.environ.get(name, default).strip()
+    v = os.environ.get(name, default).strip()
+    return "" if _unresolved(v) else v
 
 
 def _to_bool(v: Any, default: bool) -> bool:
@@ -88,7 +94,7 @@ class Account:
 
         def pick(key: str, default: Any) -> Any:
             for k in (key, key.rstrip("_")):
-                if k in data and data[k] not in (None, ""):
+                if k in data and data[k] not in (None, "") and not _unresolved(data[k]):
                     return data[k]
             return getattr(base, key) if base is not None else default
 
