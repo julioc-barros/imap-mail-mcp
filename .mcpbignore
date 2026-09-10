@@ -1,0 +1,13 @@
+.venv/
+.git/
+.github/
+tests/
+dist/
+build/
+*.mcpb
+__pycache__/
+*.pyc
+.pytest_cache/
+.env
+.env.example
+uv.lock
