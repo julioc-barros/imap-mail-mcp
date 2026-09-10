@@ -31,6 +31,9 @@ jobs:
           npx -y @anthropic-ai/mcpb validate manifest.json
           npx -y @anthropic-ai/mcpb pack . dist/imap-mail-mcp-${GITHUB_REF_NAME#v}.mcpb
       - name: Publish to PyPI
+        # Só funciona depois de configurar Trusted Publishing no pypi.org;
+        # até lá falha sem bloquear o Release (que leva o .mcpb).
+        continue-on-error: true
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
           packages-dir: dist/
